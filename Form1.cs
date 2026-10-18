@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.Windows.Forms;
@@ -14,10 +15,14 @@ namespace Calculator
         private Panel memoryPanel;
         private TableLayoutPanel buttonsPanel;
 
-        private double currentValue = 0;
+        // Pending calculation, stored as operands and operators waiting to be applied.
+        // Operators are applied by precedence: power, then x / mod, then + -.
+        private readonly List<double> pendingValues = new List<double>();
+        private readonly List<string> pendingOperators = new List<string>();
+
         private double memoryValue = 0;
-        private string currentOperator = "";
         private bool newEntry = true;
+        private bool operatorJustPressed = false;
 
 
         public Form1()
@@ -223,6 +228,9 @@ namespace Calculator
         {
             string key = ((Button)sender).Text;
 
+            bool previousWasOperator = operatorJustPressed;
+            operatorJustPressed = false;
+
             if (key.Length == 1 && char.IsDigit(key[0]))
             {
                 AppendDigit(key);
@@ -252,7 +260,7 @@ namespace Calculator
                 case "÷":
                 case "mod":
                 case "xʸ":
-                    SetOperator(key);
+                    SetOperator(key, previousWasOperator);
                     break;
                 case "=":
                     CalculateResult();
@@ -309,6 +317,7 @@ namespace Calculator
         {
             string key = ((Button)sender).Text;
             double value = ParseDisplay();
+            operatorJustPressed = false;
 
             switch (key)
             {
@@ -360,13 +369,14 @@ namespace Calculator
         private void ToggleSign()
         {
             double value = ParseDisplay();
-            UpdateDisplay(FormatNumber(-value));
+            UpdateDisplay(FormatNumber(value == 0 ? 0 : -value));
         }
 
         private void ClearAll()
         {
-            currentValue = 0;
-            currentOperator = "";
+            pendingValues.Clear();
+            pendingOperators.Clear();
+            operatorJustPressed = false;
             txtExpression.Text = "";
             UpdateDisplay("0");
             newEntry = true;
@@ -389,65 +399,156 @@ namespace Calculator
                 txtDisplay.Text = "0";
         }
 
-        private void SetOperator(string op)
+        private void SetOperator(string op, bool replaceLast)
         {
-            currentValue = ParseDisplay();
-            currentOperator = op;
-            txtExpression.Text = FormatNumber(currentValue) + " " + op;
+            // Pressing a second operator right after the first one replaces it.
+            if (replaceLast && pendingOperators.Count > 0)
+            {
+                pendingOperators[pendingOperators.Count - 1] = op;
+                UpdateExpressionText();
+                operatorJustPressed = true;
+                return;
+            }
+
+            pendingValues.Add(ParseDisplay());
+
+            // Apply earlier operators that bind at least as tightly as the new one.
+            while (pendingOperators.Count > 0 &&
+                   AppliesBefore(pendingOperators[pendingOperators.Count - 1], op))
+            {
+                if (!ApplyTopOperator())
+                    return;
+            }
+
+            pendingOperators.Add(op);
+            UpdateExpressionText();
             newEntry = true;
+            operatorJustPressed = true;
         }
 
         private void CalculateResult()
         {
-            if (currentOperator == "")
+            if (pendingOperators.Count == 0)
                 return;
 
-            double secondValue = ParseDisplay();
-            double result = currentValue;
+            pendingValues.Add(ParseDisplay());
 
-            switch (currentOperator)
+            while (pendingOperators.Count > 0)
             {
-                case "+":
-                    result = currentValue + secondValue;
-                    break;
-                case "-":
-                    result = currentValue - secondValue;
-                    break;
-                case "×":
-                    result = currentValue * secondValue;
-                    break;
-                case "÷":
-                    if (secondValue == 0)
-                    {
-                        ShowError();
-                        return;
-                    }
-                    result = currentValue / secondValue;
-                    break;
-                case "mod":
-                    if (secondValue == 0)
-                    {
-                        ShowError();
-                        return;
-                    }
-                    result = currentValue % secondValue;
-                    break;
-                case "xʸ":
-                    result = Math.Pow(currentValue, secondValue);
-                    break;
+                if (!ApplyTopOperator())
+                    return;
             }
+
+            double result = pendingValues[0];
+            pendingValues.Clear();
 
             UpdateDisplay(FormatNumber(result));
             txtExpression.Text = "";
-            currentValue = result;
-            currentOperator = "";
             newEntry = true;
+        }
+
+        private static int Precedence(string op)
+        {
+            switch (op)
+            {
+                case "xʸ":
+                    return 3;
+                case "×":
+                case "÷":
+                case "mod":
+                    return 2;
+                default:
+                    return 1;
+            }
+        }
+
+        // True if the operator already waiting must be applied before the new one.
+        // Power is right-associative (2^3^2 = 2^9), all other operators are left-associative.
+        private static bool AppliesBefore(string waiting, string incoming)
+        {
+            int waitingLevel = Precedence(waiting);
+            int incomingLevel = Precedence(incoming);
+
+            if (waitingLevel != incomingLevel)
+                return waitingLevel > incomingLevel;
+
+            return incoming != "xʸ";
+        }
+
+        // Applies the most recent pending operator to the two most recent operands.
+        // Returns false (after showing "Error") if the operation is not possible.
+        private bool ApplyTopOperator()
+        {
+            string op = pendingOperators[pendingOperators.Count - 1];
+            double right = pendingValues[pendingValues.Count - 1];
+            double left = pendingValues[pendingValues.Count - 2];
+
+            pendingOperators.RemoveAt(pendingOperators.Count - 1);
+            pendingValues.RemoveRange(pendingValues.Count - 2, 2);
+
+            double result;
+
+            switch (op)
+            {
+                case "+":
+                    result = left + right;
+                    break;
+                case "-":
+                    result = left - right;
+                    break;
+                case "×":
+                    result = left * right;
+                    break;
+                case "÷":
+                    if (right == 0)
+                    {
+                        ShowError();
+                        return false;
+                    }
+                    result = left / right;
+                    break;
+                case "mod":
+                    if (right == 0)
+                    {
+                        ShowError();
+                        return false;
+                    }
+                    result = left % right;
+                    break;
+                case "xʸ":
+                    result = Math.Pow(left, right);
+                    break;
+                default:
+                    result = right;
+                    break;
+            }
+
+            if (double.IsNaN(result) || double.IsInfinity(result))
+            {
+                ShowError();
+                return false;
+            }
+
+            pendingValues.Add(result);
+            UpdateDisplay(FormatNumber(result));
+            return true;
+        }
+
+        private void UpdateExpressionText()
+        {
+            string text = "";
+
+            for (int i = 0; i < pendingOperators.Count; i++)
+                text += FormatNumber(pendingValues[i]) + " " + pendingOperators[i] + " ";
+
+            txtExpression.Text = text.Trim();
         }
 
         private void Percent()
         {
             double value = ParseDisplay();
-            double result = currentValue * value / 100.0;
+            double baseValue = pendingValues.Count > 0 ? pendingValues[pendingValues.Count - 1] : 0;
+            double result = baseValue * value / 100.0;
             UpdateDisplay(FormatNumber(result));
         }
 
@@ -535,7 +636,7 @@ namespace Calculator
         {
             double value = ParseDisplay();
 
-            if (value < 0 || value != Math.Floor(value))
+            if (value < 0 || value != Math.Floor(value) || value > 170)
             {
                 ShowError();
                 return;
@@ -552,22 +653,37 @@ namespace Calculator
         private void Sin()
         {
             double radians = ParseDisplay() * Math.PI / 180.0;
-            UpdateDisplay(FormatNumber(Math.Sin(radians)));
+            UpdateDisplay(FormatNumber(CleanResult(Math.Sin(radians))));
             newEntry = true;
         }
 
         private void Cos()
         {
             double radians = ParseDisplay() * Math.PI / 180.0;
-            UpdateDisplay(FormatNumber(Math.Cos(radians)));
+            UpdateDisplay(FormatNumber(CleanResult(Math.Cos(radians))));
             newEntry = true;
         }
 
         private void Tan()
         {
             double radians = ParseDisplay() * Math.PI / 180.0;
-            UpdateDisplay(FormatNumber(Math.Tan(radians)));
+
+            // tan is undefined where cos is (numerically) zero, e.g. 90 degrees.
+            if (Math.Abs(Math.Cos(radians)) < 1e-12)
+            {
+                ShowError();
+                return;
+            }
+
+            UpdateDisplay(FormatNumber(CleanResult(Math.Tan(radians))));
             newEntry = true;
+        }
+
+        // Removes floating-point noise such as sin(180 deg) = 1.2E-16 and avoids "-0".
+        private static double CleanResult(double value)
+        {
+            value = Math.Round(value, 12);
+            return value == 0 ? 0 : value;
         }
 
         private void SetConstant(double value)
@@ -579,8 +695,10 @@ namespace Calculator
         private void ShowError()
         {
             txtDisplay.Text = "Error";
-            currentValue = 0;
-            currentOperator = "";
+            pendingValues.Clear();
+            pendingOperators.Clear();
+            txtExpression.Text = "";
+            operatorJustPressed = false;
             newEntry = true;
         }
 
